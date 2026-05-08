@@ -1,0 +1,48 @@
+{
+  "salutation": [
+    [
+      "Azul fellawn! Amek t-tellid?",
+      "مرحباً بك! كيف حالك؟"
+    ],
+    [
+      "Azul! Labas? Matta tgedid?",
+      "السلام عليكم! كيف الحال؟"
+    ],
+    [
+      "Ansuf! Amek ara tgedid?",
+      "أهلاً وسهلاً! كيف تكون؟"
+    ],
+    [
+      "Azul! Labas darun?",
+      "مرحباً! الجميع بخير؟"
+    ]
+  ],
+  "remerciement": [
+    [
+      "Tanmmirt nwen! Ayuz.",
+      "شكراً لك! بارك الله فيك."
+    ],
+    [
+      "Tanimirt! Qqim di lhen.",
+      "شكراً جزيلاً! ابقَ بخير."
+    ],
+    [
+      "Tanmmirt aṭas! Ad yas iman ines.",
+      "شكراً كثيراً! جزاك الله خيراً."
+    ]
+  ],
+  "au_revoir": [
+    [
+      "Ar tufat! Qqim di lhen.",
+      "إلى اللقاء، في أمان الله."
+    ],
+    [
+      "Bslama! Ar timlilit.",
+      "مع السلامة! إلى اللقاء."
+    ],
+    [
+      "Ar ass nniḍen! Llah ibarek.",
+      "إلى يوم آخر! بارك الله فيك."
+    ]
+  ]
+}

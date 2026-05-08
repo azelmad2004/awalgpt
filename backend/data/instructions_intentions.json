@@ -1,0 +1,10 @@
+{
+  "traduction": "Traduisez directement. 'tamazight' = traduction en Tamazight Latin. 'arabe' = traduction en Arabe.",
+  "culture": "Expliquez l'aspect culturel amazigh avec fierté et profondeur. Incluez le proverbe si pertinent.",
+  "apprentissage": "Ton pédagogique et encourageant. Expliquez vocabulaire ou règle grammaticale clairement.",
+  "question_info": "Réponse factuelle et directe. Donnez la vraie réponse. Si RAG vide, utilisez la connaissance générale.",
+  "salutation": "Salutation chaleureuse et authentique en Tamazight Latin.",
+  "au_revoir": "Formule d'au revoir respectueuse en Tamazight Latin.",
+  "remerciement": "Gratitude concise en Tamazight Latin.",
+  "general": "Répondez directement à la question posée. Utilisez la connaissance générale si RAG vide."
+}

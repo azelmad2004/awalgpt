@@ -1,0 +1,84 @@
+{
+  "salutation": [
+    "azul",
+    "salam",
+    "slm",
+    "bonjour",
+    "hello",
+    "labas",
+    "mrhba",
+    "ansuf"
+  ],
+  "au_revoir": [
+    "bslama",
+    "au revoir",
+    "bye",
+    "ar tufid",
+    "ar dimal",
+    "ar timlilit"
+  ],
+  "remerciement": [
+    "tanmmirt",
+    "tanimirt",
+    "merci",
+    "thank",
+    "shukran",
+    "barakallah"
+  ],
+  "traduction": [
+    "suqel",
+    "translate",
+    "traduction",
+    "signifie",
+    "ma3na",
+    "ini",
+    "dacu",
+    "amek"
+  ],
+  "question_info": [
+    "mani",
+    "manda",
+    "acu",
+    "fin",
+    "where",
+    "what",
+    "how",
+    "matta",
+    "isqsa",
+    "melmi",
+    "mamek",
+    "l3asima",
+    "tigemmi",
+    "righ akis9sagh",
+    "righ issn",
+    "bghit n3ref",
+    "maydiyan"
+  ],
+  "culture": [
+    "yennayer",
+    "culture",
+    "amazigh",
+    "berbere",
+    "aheydus",
+    "ahidus",
+    "idurar",
+    "tamazgha",
+    "tifinagh",
+    "tafaska",
+    "massinissa",
+    "jugurtha"
+  ],
+  "apprentissage": [
+    "3lm",
+    "learn",
+    "apprendre",
+    "ssn",
+    "fhm",
+    "teach",
+    "annelmud",
+    "aselmd",
+    "almud",
+    "comment ecrire",
+    "how to say"
+  ]
+}
