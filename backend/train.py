@@ -48,31 +48,8 @@ with open(os.path.join(DATA_DIR, "dataset.csv"), encoding="utf-8", errors="repla
 noms_domaine = list(noms_domaine)
 log.info(f"Dataset : {len(X)} lignes. Entités trouvées : {len(noms_domaine)}")
 
-# 2. Augmentation (Linguistic Mixing)
-log.info("Génération de l'augmentation...")
-particules = ["d", "n", "i", "g", "s", "ay", "tga"]
-X_aug, y_aug = [], []
-
-for intent, keywords in mots_cles.items():
-    for _ in range(300): # Générer 300 exemples par intention
-        q = random.choice(keywords)
-        d = random.choice(noms_domaine) if noms_domaine else "khenifra"
-        p = random.choice(particules)
-        
-        # Patrons de mixage
-        patterns = [
-            f"{q} {p} {d}",
-            f"{p} {d} {q}",
-            f"{d} {q} {p}",
-            f"{q} {d}",
-            f"{d} {p} {q} ?"
-        ]
-        X_aug.append(random.choice(patterns))
-        y_aug.append(intent)
-
-X.extend(X_aug)
-y.extend(y_aug)
-log.info(f"Total après augmentation : {len(X)} exemples")
+# 2. Augmentation (Linguistic Mixing) - SUPPRIMÉ
+log.info(f"Total pour l'entraînement : {len(X)} exemples")
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 
