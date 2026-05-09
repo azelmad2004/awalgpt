@@ -105,10 +105,15 @@ async def init_mysql_pool():
 
 
 async def initialiser_base():
-    """Crée les tables si elles n'existent pas."""
+    """
+    Crée les tables et applique les migrations de schéma.
+    Gère les anciennes tables avec des colonnes différentes.
+    """
     if USE_MYSQL:
         async with _pool.acquire() as conn:
             async with conn.cursor() as cur:
+
+                # ── Table utilisateurs ────────────────────────────────────
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS utilisateurs (
                         id VARCHAR(64) PRIMARY KEY,
@@ -119,23 +124,54 @@ async def initialiser_base():
                         cree_le DATETIME DEFAULT CURRENT_TIMESTAMP
                     ) CHARACTER SET utf8mb4
                 """)
+
+                # ── Table messages : DROP + RECREATE si schéma incorrect ──
+                # On vérifie si la colonne 'message_utilisateur' existe
+                await cur.execute("""
+                    SELECT COUNT(*) FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME   = 'messages'
+                      AND COLUMN_NAME  = 'message_utilisateur'
+                """)
+                col_exists = (await cur.fetchone())[0]
+
+                if not col_exists:
+                    log.warning("[DB] Schéma 'messages' obsolète détecté — migration en cours...")
+                    # Sauvegarde l'ancienne table si elle existe
+                    await cur.execute("""
+                        CREATE TABLE IF NOT EXISTS messages_backup
+                        SELECT * FROM messages
+                    """)
+                    await cur.execute("DROP TABLE IF EXISTS messages")
+                    log.info("[DB] Ancienne table 'messages' archivée dans 'messages_backup'")
+
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS messages (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        utilisateur_id VARCHAR(64),
-                        conversation_id VARCHAR(100),
+                        id               INT AUTO_INCREMENT PRIMARY KEY,
+                        utilisateur_id   VARCHAR(64),
+                        conversation_id  VARCHAR(100),
                         message_utilisateur TEXT,
-                        message_bot TEXT,
-                        domaine VARCHAR(50),
-                        intention VARCHAR(50),
-                        langue VARCHAR(30),
-                        temps_ms INT,
-                        horodatage DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_user (utilisateur_id),
-                        INDEX idx_conv (conversation_id)
+                        message_bot      TEXT,
+                        domaine          VARCHAR(50),
+                        intention        VARCHAR(50),
+                        langue           VARCHAR(30),
+                        temps_ms         INT,
+                        horodatage       DATETIME DEFAULT CURRENT_TIMESTAMP
                     ) CHARACTER SET utf8mb4
                 """)
-        log.info("[DB] Tables MySQL vérifiées/créées")
+
+                # Index séparément (pas dans CREATE TABLE pour éviter erreurs si déjà présents)
+                for idx_sql in [
+                    "CREATE INDEX IF NOT EXISTS idx_user ON messages(utilisateur_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_conv ON messages(conversation_id)",
+                ]:
+                    try:
+                        await cur.execute(idx_sql)
+                    except Exception:
+                        pass  # Index déjà présent
+
+        log.info("[DB] ✓ Tables MySQL prêtes")
+
     else:
         async with aiosqlite.connect(CHEMIN_BD) as bd:
             await bd.executescript("""
@@ -154,7 +190,7 @@ async def initialiser_base():
                 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
             """)
             await bd.commit()
-        log.info("[DB] Tables SQLite vérifiées/créées")
+        log.info("[DB] ✓ Tables SQLite prêtes")
 
 
 # ── Helpers DB ────────────────────────────────────────────────────────────
@@ -257,15 +293,15 @@ async def bd_lister_conversations(uid: str) -> list:
         f"SELECT conversation_id, MAX(horodatage) as d, "
         f"MIN(message_utilisateur) as t, COUNT(*) as nb "
         f"FROM messages WHERE utilisateur_id={ph} "
-        f"GROUP BY conversation_id ORDER BY d DESC",
+        f"GROUP BY conversation_id ORDER BY d DESC LIMIT 50",
         (uid,)
     )
     return [
         {
             "id":         r["conversation_id"],
-            "title":      (r["t"] or "Nouvelle discussion")[:30],
-            "updated_at": str(r["d"]),
-            "count":      r["nb"],
+            "title":      (r.get("t") or "Nouvelle discussion")[:30],
+            "updated_at": str(r.get("d", "")),
+            "count":      r.get("nb", 0),
         }
         for r in rows
     ]
@@ -518,6 +554,30 @@ async def supprimer_conversation(cid: str, u=Depends(obtenir_utilisateur)):
         (u["id"], cid)
     )
     return {"status": "ok"}
+
+
+# ── Debug: voir le vrai schéma MySQL ─────────────────────────────────────
+
+@app.get("/debug/schema")
+async def debug_schema(key: str = None):
+    """Retourne les colonnes réelles de la table messages (pour debug)."""
+    if key != os.getenv("ADMIN_KEY", "awal_debug_2026"):
+        raise HTTPException(403, "Accès refusé")
+    if not USE_MYSQL:
+        return {"db": "sqlite", "info": "pas d'inspection disponible"}
+    import aiomysql
+    async with _pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("""
+                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'
+                ORDER BY ORDINAL_POSITION
+            """)
+            cols = await cur.fetchall()
+            await cur.execute("SELECT COUNT(*) as n FROM messages")
+            count = (await cur.fetchone())["n"]
+    return {"table": "messages", "colonnes": cols, "total_lignes": count}
 
 
 # ── Entrée ────────────────────────────────────────────────────────────────
