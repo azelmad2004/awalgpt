@@ -1,8 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import axios from "axios";
 const AuthContext = createContext(null);
-axios.defaults.baseURL =
-  process.env.REACT_APP_API_URL || "http://localhost:8000";
+axios.defaults.baseURL = "https://backend-production-72c3.up.railway.app";
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
