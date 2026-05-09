@@ -31,7 +31,8 @@ app = FastAPI(title="AWAL GPT API")
 # --- CONFIGURATION CRUCIALE : CORS ---
 # Remplace ces URLs par tes URLs Railway réelles
 origins = [
-    "https://awal-gpt.up.railway.app", # Ton frontend
+    "https://awal-gpt.up.railway.app",
+    "https://awal-gpt.up.railway.app:3000",# Ton frontend
     "http://localhost:3000",           # Pour tes tests locaux
 ]
 
