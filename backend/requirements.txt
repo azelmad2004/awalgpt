@@ -7,7 +7,7 @@ numpy
 scikit-learn
 aiosqlite
 pyjwt
-bcrypt
+bcrypt==4.0.1
 python-multipart
 httpx
 sqlalchemy
