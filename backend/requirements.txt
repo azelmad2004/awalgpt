@@ -10,6 +10,3 @@ pyjwt
 bcrypt
 python-multipart
 httpx
-aiomysql
-cryptography
-sqlalchemy
