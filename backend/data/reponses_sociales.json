@@ -1,48 +1,67 @@
 {
   "salutation": [
-    [
-      "Azul fellawn! Amek t-tellid?",
-      "مرحباً بك! كيف حالك؟"
-    ],
-    [
-      "Azul! Labas? Matta tgedid?",
-      "السلام عليكم! كيف الحال؟"
-    ],
-    [
-      "Ansuf! Amek ara tgedid?",
-      "أهلاً وسهلاً! كيف تكون؟"
-    ],
-    [
-      "Azul! Labas darun?",
-      "مرحباً! الجميع بخير؟"
-    ]
+    ["Azul fell-awen! Labas?", "أهلاً بكم! كيف حالكم؟"],
+    ["Azul! Merha bikum di taddart n tmazight.", "أهلاً! مرحباً بكم في بيت الأمازيغية."],
+    ["Tifawin! Matta tgid?", "صباح الخير! كيف حالك؟"],
+    ["Timensiwin! Azul fllak.", "مساء الخير! تحية لك."],
+    ["Azul! Isem-iw d AWAL GPT, matta trit?", "أهلاً! اسمي أوال جي بي تي، ماذا تريد؟"],
+    ["Asellam! Labas fell-ak?", "السلام! هل أنت بخير؟"],
+    ["Azul! Tanemmirt i tmughli-inek.", "أهلاً! شكراً لزيارتك."],
+    ["Merha! Azul nkk asarmawan.", "مرحباً! أهلاً أنا في الخدمة."],
+    ["Azul! Yak labas? Tanmirt atas.", "أهلاً! هل كل شيء بخير؟ شكراً جزيلاً."],
+    ["Azul! Azul n Rebbi fell-ak.", "أهلاً! تحية الله عليك."],
+    ["Azul! Mantegh tllid?", "أهلاً! كيف حالك؟"],
+    ["Azul fllam a ultma!", "أهلاً بكِ يا أختي!"],
+    ["Azul fllak a gma!", "أهلاً بك يا أخي!"],
+    ["Assalam o 3alaykom! Labas?", "السلام عليكم! هل أنت بخير؟"],
+    ["Azul! Yak kulu tghuda?", "أهلاً! هل كل شيء جيد؟"],
+    ["Azul! Merha s imurig.", "أهلاً! مرحباً بكم."],
+    ["Tifawin n lkhir!", "صباح الخير والبركة!"],
+    ["Timensiwin n ssa3t!", "مساء السرور!"],
+    ["Azul! Isem-iw d Awal GPT.", "أهلاً! اسمي أوال جي بي تي."]
   ],
   "remerciement": [
-    [
-      "Tanmmirt nwen! Ayuz.",
-      "شكراً لك! بارك الله فيك."
-    ],
-    [
-      "Tanimirt! Qqim di lhen.",
-      "شكراً جزيلاً! ابقَ بخير."
-    ],
-    [
-      "Tanmmirt aṭas! Ad yas iman ines.",
-      "شكراً كثيراً! جزاك الله خيراً."
-    ]
+    ["Ur yelli wayen! S wul.", "لا شكر على واجب! من القلب."],
+    ["Tanemmirt atas! Nkk d-aghilif.", "شكراً جزيلاً! أنا في الخدمة."],
+    ["Aghilif d nkk! Tanmirt.", "العفو! شكراً لك."],
+    ["Allah ybark! Tanemmirt fell-ak.", "بارك الله فيك! شكراً لك."],
+    ["Ur d-aghilif! Merha bik.", "لا مشكلة! مرحباً بك."],
+    ["Tanmirt nnek! S lferh.", "شكراً لك! بكل سرور."],
+    ["Bark allah u fik! Tanemmirt.", "بارك الله فيك! شكراً."],
+    ["Tanemmirt i tallalt-ik.", "شكراً لمساعدتك."],
+    ["Ih! Tanmirt atas atas.", "نعم! شكراً جزيلاً جداً."],
+    ["Ur yelli ubrid! Tanemmirt.", "لا عليك! شكراً."],
+    ["S lferh d wul!", "بكل سرور ومن القلب!"],
+    ["Tanmirt atas a gma.", "شكراً جزيلاً يا أخي."],
+    ["Tanmirt n Rebbi!", "شكراً لله!"],
+    ["Tanmirt i tmughli-inek.", "شكراً لاهتمامك."],
+    ["Ur d-aghilif nniḍen.", "لا داعي للشكر مجدداً."],
+    ["Tanmirt i wawal-ik.", "شكراً لكلامك."],
+    ["S ssaḥa d lhenna!", "بالصحة والهناء!"],
+    ["Tanmirt i tiddas-ik.", "شكراً لمجهودك."],
+    ["Ur yelli wayen d ameqqran.", "لا شكر على واجب كبير."],
+    ["Tanmirt atas atas!", "شكراً جزيلاً جداً!"]
   ],
   "au_revoir": [
-    [
-      "Ar tufat! Qqim di lhen.",
-      "إلى اللقاء، في أمان الله."
-    ],
-    [
-      "Bslama! Ar timlilit.",
-      "مع السلامة! إلى اللقاء."
-    ],
-    [
-      "Ar ass nniḍen! Llah ibarek.",
-      "إلى يوم آخر! بارك الله فيك."
-    ]
+    ["Ar tufat! Thlla g ikhf-nk.", "إلى اللقاء! اعتنِ بنفسك."],
+    ["Ar imiren! Nttmater s lkhir.", "إلى الملتقى! نلتقي على خير."],
+    ["Ar ass nniden! Asellam fell-ak.", "إلى يوم آخر! السلام عليك."],
+    ["Bslama! Ar d-nughal.", "بسلامة! سنعود قريباً."],
+    ["Ar tichi! Thlla atas.", "إلى اللقاء قريباً! اعتنِ بنفسك كثيراً."],
+    ["Rebbi ak yessakel! Ar tufat.", "ليصحبك الله! إلى اللقاء."],
+    ["Nttmater! Ar tufat a ghma.", "نلتقي! إلى اللقاء يا أخي."],
+    ["Ar imiren! Thlla g taddart.", "إلى الملتقى! اعتنِ بالبيت."],
+    ["Asellam! Ar d-nttmater.", "السلام! سنلتقي مجدداً."],
+    ["Ar tufat! Azul fllawen.", "إلى اللقاء! تحية لكم."],
+    ["Ar d-nemlili!", "سنلتقي مجدداً!"],
+    ["Ar azekka!", "إلى الغد!"],
+    ["Thlla g imur nnek.", "اعتنِ بمنزلك."],
+    ["Abrid n lkhir!", "طريق السلامة!"],
+    ["Rebbi ak i3awn!", "الله يعينك!"],
+    ["Ar tufat nniden.", "إلى لقاء آخر."],
+    ["Ad d-nttmater s lkhir.", "سنلتقي على خير."],
+    ["Thlla g middn nnek.", "اعتنِ بأهلك."],
+    ["Ar ass n lkhmir!", "إلى يوم الخميس (لقاء قريب)!"],
+    ["Asellam fell-awen!", "السلام عليكم!"]
   ]
 }

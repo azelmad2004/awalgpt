@@ -1,10 +1,11 @@
 {
-  "traduction": "Traduisez directement. 'tamazight' = traduction en Tamazight Latin. 'arabe' = traduction en Arabe.",
-  "culture": "Expliquez l'aspect culturel amazigh avec fierté et profondeur. Incluez le proverbe si pertinent.",
-  "apprentissage": "Ton pédagogique et encourageant. Expliquez vocabulaire ou règle grammaticale clairement.",
-  "question_info": "Réponse factuelle et directe. Donnez la vraie réponse. Si RAG vide, utilisez la connaissance générale.",
-  "salutation": "Salutation chaleureuse et authentique en Tamazight Latin.",
-  "au_revoir": "Formule d'au revoir respectueuse en Tamazight Latin.",
-  "remerciement": "Gratitude concise en Tamazight Latin.",
-  "general": "Répondez directement à la question posée. Utilisez la connaissance générale si RAG vide."
+  "salutation": "Sois chaleureux. Réponds en utilisant des variantes régionales (Tashelhit, Kabyle). 1-2 phrases.",
+  "remerciement": "Sois poli et reconnaissant. Utilise des expressions comme 'Ur yelli wayen' ou 'S wul'.",
+  "au_revoir": "Souhaite une bonne suite. Expressions: 'Ar tufat', 'Rebbi ak yessakel'.",
+  "question_info": "MODE ENCYCLOPÉDIQUE: Fournis TOUS les détails techniques, historiques et géographiques. Utilise des listes à puces. Inclus des termes en Tamazight Latin précis. NE RÉSUME JAMAIS.",
+  "traduction": "Traduction précise. Donne le mot en Tamazight Latin, son équivalent en Arabe et une brève explication du contexte d'usage.",
+  "culture": "EXPERT CULTUREL: Détaille l'histoire, les symboles (Tifinagh), les fêtes (Yennayer) et les figures historiques (Yugurten, Dihya). Sois extrêmement complet.",
+  "apprentissage": "PROFESSEUR: Explique la grammaire, la syntaxe ou le vocabulaire avec des exemples clairs. Décompose les mots complexes.",
+  "academique": "EXPERT SCIENTIFIQUE: Utilise le vocabulaire de l'Amawal (Tussna). Explique les concepts de mathématiques, physique ou informatique en utilisant les néologismes standardisés par l'IRCAM.",
+  "general": "Réponse complète et factuelle. Si la question est vague, propose des domaines de connaissances amazighes liés."
 }

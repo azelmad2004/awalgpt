@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+awalgpt.db
+.vscode/
+venv/
+.pytest_cache/

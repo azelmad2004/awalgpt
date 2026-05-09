@@ -1,13 +1,25 @@
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 # main.py — Serveur FastAPI AWAL GPT
 # Rôle : Authentification JWT, streaming SSE, gestion conversations SQLite
-# Fix appliqué : typo \"n\n → \n\n dans l'event SSE step (ligne intent)
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+import logging
+# ── Logger Configuration (Must be before other imports) ──────────────────
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
+    force=True
+)
+for _lib in ("sentence_transformers", "httpx", "faiss", "transformers", "urllib3", "asyncio", "aiosqlite", "uvicorn", "rapidfuzz"):
+    logging.getLogger(_lib).setLevel(logging.ERROR)
+log = logging.getLogger("awalgpt")
+
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import time
 import json
 import hashlib
-import logging
 import asyncio
 import sys
 from datetime import datetime, timezone, timedelta
@@ -19,26 +31,14 @@ import jwt
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-
 import brain
-from core import chargerMoteurTfidf, chargerMoteurSemantique
 
 # ── Configuration ──────────────────────────────────────────────────────────
-CLE_GROQ   = os.getenv("GROQ_API_KEY", "")
+CLE_GROQ   = os.getenv("GROQ_API_KEY", "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")
 SECRET_JWT = os.getenv("JWT_SECRET", "awal_gpt_ultra_secure_secret_key_2026_long_enough")
 CHEMIN_BD  = os.getenv("DB_PATH", "awalgpt.db")
 
 DOMAINES_VALIDES = {"health", "economy", "education", "culture", "tech", "daily"}
-
-# ── Logger ─────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%H:%M:%S",
-)
-for _lib in ("sentence_transformers", "httpx", "faiss", "transformers", "urllib3"):
-    logging.getLogger(_lib).setLevel(logging.ERROR)
-log = logging.getLogger("awalgpt")
 
 
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
@@ -48,6 +48,11 @@ log = logging.getLogger("awalgpt")
 async def initialiser_base() -> None:
     """Crée toutes les tables SQLite au premier démarrage."""
     async with aiosqlite.connect(CHEMIN_BD) as bd:
+        # Optimisations SQLite
+        await bd.execute("PRAGMA journal_mode=WAL")
+        await bd.execute("PRAGMA synchronous=NORMAL")
+        await bd.execute("PRAGMA cache_size=10000")
+        
         await bd.executescript("""
             CREATE TABLE IF NOT EXISTS utilisateurs (
                 id TEXT PRIMARY KEY, nom TEXT, email TEXT UNIQUE,
@@ -116,6 +121,7 @@ async def bd_inserer_message(
     domaine: str, intention: str, langue: str, temps_ms: int
 ) -> None:
     """Sauvegarde un échange utilisateur/bot dans la base."""
+    log.debug(f"[DB] Inserer message: CID={cid} | Intent={intention}")
     async with aiosqlite.connect(CHEMIN_BD) as bd:
         await bd.execute(
             "INSERT INTO messages "
@@ -133,13 +139,13 @@ async def bd_lister_conversations(uid: str) -> list:
     async with aiosqlite.connect(CHEMIN_BD) as bd:
         bd.row_factory = aiosqlite.Row
         cur = await bd.execute(
-            "SELECT conversation_id, MAX(horodatage) as d, message_utilisateur as t "
+            "SELECT conversation_id, MAX(horodatage) as d, message_utilisateur as t, COUNT(*) as nb "
             "FROM messages WHERE utilisateur_id=? "
             "GROUP BY conversation_id ORDER BY d DESC",
             (uid,)
         )
         return [
-            {"id": l[0], "title": (l[2] or "")[:30], "updated_at": l[1]}
+            {"id": l[0], "title": (l[2] or "Nouvelle discussion")[:30], "updated_at": l[1], "count": l[3]}
             for l in await cur.fetchall()
         ]
 
@@ -186,9 +192,11 @@ async def lifespan(app: FastAPI):
     """Initialisation au démarrage, nettoyage à l'arrêt."""
     log.info("[STARTUP] Initialisation Awal GPT...")
     await initialiser_base()
-    brain.detecteur.charger()
-    chargerMoteurTfidf()
-    chargerMoteurSemantique()
+    
+    # Initialisation des composants Brain/Core
+    # Note: brain.core.charger_donnees_fusionnees() est déjà appelé lors de l'import
+    brain.charger_configs()
+    
     log.info("[STARTUP] Awal GPT prêt.")
     yield
     log.info("[SHUTDOWN] Awal GPT arrêté.")
@@ -203,6 +211,14 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+
+@app.get("/")
+async def root():
+    return {"name": "Awal GPT API", "status": "online", "version": "3.0.0"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 # ── Endpoints d'authentification ──────────────────────────────────────────
 
@@ -263,18 +279,25 @@ async def profil_utilisateur(u=Depends(obtenir_utilisateur)):
     return {"id": u["id"], "username": u["nom"], "email": u["email"]}
 
 
+@app.get("/admin/users")
+async def admin_lister_utilisateurs(key: str = None):
+    """Route admin pour voir les inscrits (pour debug Railway)."""
+    ADMIN_KEY = os.getenv("ADMIN_KEY", "awal_debug_2026")
+    if key != ADMIN_KEY:
+        raise HTTPException(403, "Accès refusé")
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        bd.row_factory = aiosqlite.Row
+        cur = await bd.execute("SELECT id, nom, email, cree_le FROM utilisateurs")
+        utilisateurs = await cur.fetchall()
+        return {"total": len(utilisateurs), "utilisateurs": [dict(u) for u in utilisateurs]}
+
+
 # ── Endpoint de chat (Server-Sent Events) ─────────────────────────────────
 
 @app.post("/chat/stream")
 async def chat_stream(req: Request, u=Depends(obtenir_utilisateur)):
     """
     Traite un message et retourne la réponse en Server-Sent Events (SSE).
-
-    Événements envoyés :
-      step  : étapes de traitement (intent, rag, llm)
-      token : texte de la réponse finale
-      done  : métadonnées (intention, confiance, temps)
-      error : en cas d'erreur serveur
     """
     try:
         corps = await req.json()
@@ -289,53 +312,63 @@ async def chat_stream(req: Request, u=Depends(obtenir_utilisateur)):
 
     async def generer_stream():
         debut_total = time.time()
+        done_sent = False
+        final_meta = {}
+        final_response = ""
+        
         try:
             historique = await bd_historique(u["id"], cid)
-            resultat   = await brain.traiterMessage(
-                message,
-                domaine=corps.get("domain"),
-                historique=historique,
-            )
-            temps_total = int((time.time() - debut_total) * 1000)
+            
+            # brain.traiter_message est un async generator
+            async for event in brain.traiter_message(message, historique=historique):
+                if event["type"] == "step":
+                    yield f"event: step\ndata: {json.dumps({'step': event['step'], 'label': event['label']})}\n\n"
+                    # Petit délai pour la fluidité UI
+                    await asyncio.sleep(0.05)
+                
+                elif event["type"] == "final":
+                    final_response = event["reponse"]
+                    yield f"event: token\ndata: {json.dumps(final_response, ensure_ascii=False)}\n\n"
+                    
+                    final_meta = {
+                        "intention":    event.get("intention"),
+                        "confiance":    event.get("confiance", 0),
+                        "langue":       event.get("langue", "tamazight"),
+                        "temps_rag_ms": event.get("temps_rag_ms", 0),
+                        "temps_llm_ms": event.get("temps_llm_ms", 0),
+                        "temps_total":  int((time.time() - debut_total) * 1000),
+                    }
 
-            # Circuit court social : réponse directe sans étapes
-            INTENTIONS_SOCIALES = {"salutation", "remerciement", "au_revoir"}
-            if resultat["intention"] in INTENTIONS_SOCIALES and resultat.get("tempsLlmMs", 0) == 0:
-                yield f"event: token\ndata: {json.dumps(resultat['reponse'], ensure_ascii=False)}\n\n"
-            else:
-                # Étapes de traitement visibles dans le frontend
-                intent_label = f"Intention : {resultat['intention']}"
-                # FIX : \n\n correct (était \"n\n avant)
-                yield f"event: step\ndata: {json.dumps({'step': 'intent', 'label': intent_label})}\n\n"
-                await asyncio.sleep(0.2)
-                yield f"event: step\ndata: {json.dumps({'step': 'rag', 'label': 'Recherche corpus...'})}\n\n"
-                await asyncio.sleep(0.2)
-                yield f"event: step\ndata: {json.dumps({'step': 'llm', 'label': 'Génération Llama-3...'})}\n\n"
-                yield f"event: token\ndata: {json.dumps(resultat['reponse'], ensure_ascii=False)}\n\n"
+            if final_meta:
+                log.info(f"[CHAT] Stream Done: {final_meta['intention']} | total: {final_meta['temps_total']}ms | user: {u['nom']}")
+                yield f"event: done\ndata: {json.dumps(final_meta)}\n\n"
+                done_sent = True
 
-            # Métadonnées finales
-            meta = {
-                "intention":    resultat["intention"],
-                "confiance":    resultat["confiance"],
-                "langue":       resultat.get("langue", "tamazight"),
-                "temps_rag_ms": resultat.get("tempsRagMs", 0),
-                "temps_llm_ms": resultat.get("tempsLlmMs", 0),
-                "temps_total":  temps_total,
-            }
-            yield f"event: done\ndata: {json.dumps(meta)}\n\n"
-
-            # Sauvegarde en base
-            await bd_inserer_message(
-                u["id"], cid, message, resultat["reponse"],
-                corps.get("domain"), resultat["intention"],
-                resultat.get("langue"), temps_total,
-            )
+                # Sauvegarde en base
+                await bd_inserer_message(
+                    u["id"], cid, message, final_response,
+                    corps.get("domain", "general"), 
+                    final_meta["intention"],
+                    final_meta["langue"], 
+                    final_meta["temps_total"]
+                )
 
         except Exception as erreur:
             log.error(f"[CHAT] Erreur stream : {erreur}", exc_info=True)
             yield f"event: error\ndata: {json.dumps({'error': 'Erreur serveur', 'detail': str(erreur)})}\n\n"
+        finally:
+            if not done_sent:
+                yield f"event: done\ndata: {json.dumps({'error': True, 'temps_total': int((time.time()-debut_total)*1000)})}\n\n"
 
-    return StreamingResponse(generer_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        generer_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive"
+        }
+    )
 
 
 # ── Endpoints de gestion des conversations ────────────────────────────────

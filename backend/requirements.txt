@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+groq
+rapidfuzz
+numpy
+scikit-learn
+aiosqlite
+pyjwt
+bcrypt
+python-multipart
+httpx
