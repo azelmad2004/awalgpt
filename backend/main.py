@@ -1,495 +1,233 @@
-import os
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# main.py — Serveur FastAPI AWAL GPT (Version Finale Corrigée)
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 import logging
-import uuid
+import os
+import time
 import json
+import hashlib
 import asyncio
-from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Depends, Request, status, BackgroundTasks
+import aiosqlite
+import bcrypt  # المصحح: استخدام bcrypt المباشر لتجنب مشاكل passlib
+import jwt
+from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr # المصحح: إضافة Pydantic لضمان عدم حدوث KeyError
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
-from sqlalchemy import (
-    Column, Integer, String, Text, ForeignKey, 
-    DateTime, Boolean, select, delete, update, func
-)
+import brain
 
-from pydantic import BaseModel, EmailStr, Field
-from jose import JWTError, jwt
-import bcrypt
-from dotenv import load_dotenv
-
-# --- Import AWAL GPT Brain Engine ---
-try:
-    import brain
-except ImportError:
-    # Fallback for development if brain.py is missing
-    class MockBrain:
-        def generate_response(self, text):
-            yield "Azul! (Service brain non détecté - Mode test)"
-    brain = MockBrain()
-
-load_dotenv()
-
-# ==========================================
-# 1. CONFIGURATION & LOGGING
-# ==========================================
+# ── Logger Configuration ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
+    force=True
 )
-log = logging.getLogger("AWAL-GPT-PRO")
+log = logging.getLogger("awalgpt")
 
-app = FastAPI(
-    title="AWAL GPT - API Professionnelle",
-    description="Backend API pour le système Amazigh NLP - Projet PFE 2026",
-    version="2.5.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
-)
+# ── Configuration ──────────────────────────────────────────────────────────
+SECRET_JWT = os.getenv("JWT_SECRET", "awal_gpt_ultra_secure_secret_key_2026_long_enough")
+CHEMIN_BD  = os.getenv("DB_PATH", "awalgpt.db")
 
-# ==========================================
-# 2. SECURITY & JWT CONFIG
-# ==========================================
-SECRET_KEY = os.getenv("JWT_SECRET", "awal_gpt_ultra_secure_2026_khénifra_est")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 Jours
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-# ==========================================
-# 3. Pydantic SCHEMAS (Validation)
-# ==========================================
-class UserBase(BaseModel):
-    username: str = Field(..., min_length=3, max_length=50)
+# ── Pydantic Models (الإصلاح الجوهري لمنع KeyError) ────────────────────────
+class UserRegister(BaseModel):
+    username: str
     email: EmailStr
-
-class UserCreate(UserBase):
-    password: str = Field(..., min_length=6)
+    password: str
+    preferred_variety: str = None
 
 class UserLogin(BaseModel):
-    username: str
+    email: str
     password: str
 
-class UserUpdate(BaseModel):
-    email: Optional[EmailStr] = None
-    password: Optional[str] = None
+class ChatMessage(BaseModel):
+    message: str
+    conversation_id: str = None
+    domain: str = "general"
 
-class UserOut(UserBase):
-    id: int
-    is_active: bool
-    created_at: datetime
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# BASE DE DONNÉES SQLite (aiosqlite)
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-    class Config:
-        from_attributes = True
+async def initialiser_base() -> None:
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        await bd.executescript("""
+            CREATE TABLE IF NOT EXISTS utilisateurs (
+                id TEXT PRIMARY KEY, nom TEXT, email TEXT UNIQUE,
+                mot_de_passe TEXT, variete TEXT, cree_le TEXT
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                utilisateur_id TEXT, conversation_id TEXT,
+                message_utilisateur TEXT, message_bot TEXT,
+                domaine TEXT, intention TEXT, langue TEXT,
+                temps_ms INTEGER, horodatage TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(utilisateur_id);
+            CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
+        """)
+        await bd.commit()
+    log.info("[DB] Base initialisée")
 
-class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
-    conversation_id: Optional[str] = None
+async def bd_trouver_utilisateur(uid: str) -> dict:
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        bd.row_factory = aiosqlite.Row
+        cur = await bd.execute("SELECT * FROM utilisateurs WHERE id = ?", (uid,))
+        ligne = await cur.fetchone()
+        return dict(ligne) if ligne else None
 
-class ConversationUpdate(BaseModel):
-    title: str
+async def bd_creer_utilisateur(uid: str, nom: str, email: str, hache: str, variete: str = None) -> None:
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        await bd.execute(
+            "INSERT INTO utilisateurs VALUES (?,?,?,?,?,?)",
+            (uid, nom, email, hache, variete, datetime.now().isoformat())
+        )
+        await bd.commit()
 
-# ==========================================
-# 4. DATABASE MODELS (SQLAlchemy)
-# ==========================================
-Base = declarative_base()
+async def bd_historique(uid: str, conv_id: str) -> list:
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        bd.row_factory = aiosqlite.Row
+        cur = await bd.execute(
+            "SELECT message_utilisateur, message_bot FROM messages "
+            "WHERE utilisateur_id=? AND conversation_id=? "
+            "ORDER BY id DESC LIMIT 10",
+            (uid, conv_id)
+        )
+        lignes = await cur.fetchall()
+    hist = []
+    for ligne in reversed(lignes):
+        if ligne['message_utilisateur']:
+            hist.append({"role": "user", "content": ligne['message_utilisateur']})
+        if ligne['message_bot']:
+            hist.append({"role": "assistant", "content": ligne['message_bot']})
+    return hist
 
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, index=True, nullable=False)
-    email = Column(String(100), unique=True, index=True, nullable=False)
-    hashed_password = Column(String(255), nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    conversations = relationship("Conversation", back_populates="owner", cascade="all, delete-orphan")
+async def bd_inserer_message(uid: str, cid: str, msg_user: str, msg_bot: str,
+                            domaine: str, intention: str, langue: str, temps_ms: int) -> None:
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        await bd.execute(
+            "INSERT INTO messages (utilisateur_id, conversation_id, message_utilisateur, "
+            "message_bot, domaine, intention, langue, temps_ms, horodatage) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (uid, cid, msg_user, msg_bot, domaine, intention, langue, temps_ms, datetime.now().isoformat())
+        )
+        await bd.commit()
 
-class Conversation(Base):
-    __tablename__ = "conversations"
-    id = Column(String(100), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(Integer, ForeignKey("users.id"))
-    title = Column(String(255), default="Nouvelle discussion Amazigh")
-    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    owner = relationship("User", back_populates="conversations")
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# AUTHENTIFICATION & LIFESPAN
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-class Message(Base):
-    __tablename__ = "messages"
-    id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(String(100), ForeignKey("conversations.id"))
-    role = Column(String(20))  # 'user' or 'assistant'
-    content = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    
-    conversation = relationship("Conversation", back_populates="messages")
+def creer_token(uid: str) -> str:
+    return jwt.encode(
+        {"sub": uid, "exp": datetime.now(timezone.utc) + timedelta(days=30)},
+        SECRET_JWT, algorithm="HS256"
+    )
 
-# ==========================================
-# 5. DB CONNECTION ENGINE
-# ==========================================
-raw_url = os.getenv("MYSQL_URL")
-if raw_url and raw_url.startswith("mysql://"):
-    DATABASE_URL = raw_url.replace("mysql://", "mysql+aiomysql://")
-else:
-    # Fallback to SQLite for local safety
-    DATABASE_URL = "sqlite+aiosqlite:///./pfe_backup.db"
+async def obtenir_utilisateur(requete: Request) -> dict:
+    auth_header = requete.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token manquant")
+    token = auth_header.replace("Bearer ", "").strip()
+    try:
+        payload = jwt.decode(token, SECRET_JWT, algorithms=["HS256"])
+        utilisateur = await bd_trouver_utilisateur(payload["sub"])
+        if utilisateur: return utilisateur
+    except Exception: pass
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token invalide")
 
-engine = create_async_engine(
-    DATABASE_URL, 
-    echo=False, 
-    pool_size=10, 
-    max_overflow=20,
-    pool_pre_ping=True
-)
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await initialiser_base()
+    if hasattr(brain, 'charger_configs'): brain.charger_configs()
+    yield
 
-# ==========================================
-# 6. MIDDLEWARES & CORS
-# ==========================================
+app = FastAPI(title="Awal GPT", version="3.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
-# ==========================================
-# 7. UTILITIES (Auth & Helpers)
-# ==========================================
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# ENDPOINTS
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-def get_hashed_password(password: str) -> str:
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
-    except Exception as e:
-        log.error(f"Erreur de vérification password: {e}")
-        return False
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
+@app.post("/auth/register")
+async def inscrire(data: UserRegister): # تم الإصلاح: استخدام Pydantic
+    uid = hashlib.sha256(data.email.lower().encode()).hexdigest()
+    if await bd_trouver_utilisateur(uid):
+        raise HTTPException(400, "Email déjà utilisé")
     
-    result = await db.execute(select(User).filter(User.username == username))
-    user = result.scalars().first()
-    if user is None:
-        raise credentials_exception
-    return user
-
-# ==========================================
-# 8. STARTUP & LIFECYCLE
-# ==========================================
-@app.on_event("startup")
-async def on_startup():
-    log.info("Démarrage de AWAL GPT API...")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    log.info("Base de données synchronisée sur Railway.")
-
-# ==========================================
-# 9. ENDPOINTS: AUTHENTICATION
-# ==========================================
-
-@app.post("/auth/register", status_code=201)
-async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
-    # Check for existing user
-    stmt = select(User).filter((User.email == user_data.email) | (User.username == user_data.username))
-    existing = await db.execute(stmt)
-    if existing.scalars().first():
-        raise HTTPException(status_code=400, detail="Nom d'utilisateur ou email déjà utilisé.")
-    
-    new_user = User(
-        username=user_data.username,
-        email=user_data.email,
-        hashed_password=get_hashed_password(user_data.password)
-    )
-    db.add(new_user)
-    try:
-        await db.commit()
-        await db.refresh(new_user)
-        log.info(f"Nouvel utilisateur enregistré: {new_user.username}")
-        return {"message": "Utilisateur créé avec succès", "id": new_user.id}
-    except Exception as e:
-        await db.rollback()
-        log.error(f"Erreur lors de l'inscription: {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne du serveur")
+    # تشفير كلمة المرور بأسلوب متوافق مع Python 3.13
+    hache = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode()
+    await bd_creer_utilisateur(uid, data.username, data.email.lower(), hache, data.preferred_variety)
+    return {"token": creer_token(uid), "user": {"id": uid, "username": data.username}}
 
 @app.post("/auth/login")
-async def login(login_data: UserLogin, db: AsyncSession = Depends(get_db)):
-    stmt = select(User).filter(User.username == login_data.username)
-    result = await db.execute(stmt)
-    user = result.scalars().first()
+async def connexion(data: UserLogin): # تم الإصلاح: استخدام Pydantic لمنع KeyError
+    uid = hashlib.sha256(data.email.lower().encode()).hexdigest()
+    utilisateur = await bd_trouver_utilisateur(uid)
     
-    if not user or not verify_password(login_data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Identifiants invalides.")
-    
-    token = create_access_token(data={"sub": user.username})
-    return {
-        "access_token": token, 
-        "token_type": "bearer", 
-        "username": user.username,
-        "email": user.email
-    }
+    if utilisateur and bcrypt.checkpw(data.password.encode(), utilisateur["mot_de_passe"].encode()):
+        return {
+            "token": creer_token(uid),
+            "user": {"id": uid, "username": utilisateur["nom"]}
+        }
+    raise HTTPException(401, "Email ou mot de passe incorrect")
 
-@app.get("/auth/me", response_model=UserOut)
-async def read_users_me(current_user: User = Depends(get_current_user)):
-    return current_user
-
-@app.patch("/auth/update")
-async def update_profile(
-    update_data: UserUpdate, 
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    if update_data.email:
-        current_user.email = update_data.email
-    if update_data.password:
-        current_user.hashed_password = get_hashed_password(update_data.password)
-    
-    await db.commit()
-    return {"message": "Profil mis à jour"}
-
-# ==========================================
-# 10. ENDPOINTS: CONVERSATION MANAGEMENT
-# ==========================================
-
-@app.get("/conversations", response_model=List[Dict[str, Any]])
-async def list_user_conversations(
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    stmt = select(Conversation).filter(
-        Conversation.user_id == current_user.id
-    ).order_by(Conversation.last_updated.desc())
-    
-    result = await db.execute(stmt)
-    convs = result.scalars().all()
-    return [
-        {
-            "id": c.id, 
-            "title": c.title, 
-            "last_updated": c.last_updated.isoformat()
-        } for c in convs
-    ]
-
-@app.post("/conversations")
-async def start_new_conversation(
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    new_conv = Conversation(
-        id=str(uuid.uuid4()),
-        user_id=current_user.id, 
-        title="Discussion Amazigh - " + datetime.now().strftime("%H:%M")
-    )
-    db.add(new_conv)
-    await db.commit()
-    await db.refresh(new_conv)
-    return {"id": new_conv.id, "title": new_conv.title}
-
-@app.get("/conversations/{conv_id}/messages")
-async def get_conversation_history(
-    conv_id: str, 
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    # Security check: Does this conv belong to user?
-    stmt_check = select(Conversation).filter(
-        Conversation.id == conv_id, 
-        Conversation.user_id == current_user.id
-    )
-    check = await db.execute(stmt_check)
-    if not check.scalars().first():
-        raise HTTPException(status_code=403, detail="Accès refusé.")
-
-    stmt = select(Message).filter(
-        Message.conversation_id == conv_id
-    ).order_by(Message.timestamp.asc())
-    
-    result = await db.execute(stmt)
-    messages = result.scalars().all()
-    return [
-        {
-            "role": m.role, 
-            "content": m.content, 
-            "timestamp": m.timestamp.isoformat()
-        } for m in messages
-    ]
-
-@app.put("/conversations/{conv_id}")
-async def rename_conversation(
-    conv_id: str, 
-    update_data: ConversationUpdate,
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    stmt = update(Conversation).where(
-        (Conversation.id == conv_id) & (Conversation.user_id == current_user.id)
-    ).values(title=update_data.title)
-    
-    await db.execute(stmt)
-    await db.commit()
-    return {"status": "renamed"}
-
-@app.delete("/conversations/{conv_id}")
-async def delete_conversation(
-    conv_id: str, 
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    stmt = delete(Conversation).where(
-        (Conversation.id == conv_id) & (Conversation.user_id == current_user.id)
-    )
-    await db.execute(stmt)
-    await db.commit()
-    return {"message": "Conversation supprimée"}
-
-# ==========================================
-# 11. ENDPOINTS: CHAT ENGINE (STREAMING)
-# ==========================================
+@app.get("/auth/me")
+async def profil_utilisateur(u=Depends(obtenir_utilisateur)):
+    return {"id": u["id"], "username": u["nom"], "email": u["email"]}
 
 @app.post("/chat/stream")
-async def chat_with_awal_gpt(
-    chat_data: ChatRequest, 
-    current_user: User = Depends(get_current_user), 
-    db: AsyncSession = Depends(get_db)
-):
-    user_msg = chat_data.message
-    conv_id = chat_data.conversation_id
+async def chat_stream(req: ChatMessage, u=Depends(obtenir_utilisateur)):
+    cid = req.conversation_id or f"conv_{int(time.time())}"
     
-    # 1. Verification of conversation existence
-    if conv_id:
-        result = await db.execute(select(Conversation).filter(Conversation.id == conv_id))
-        conv = result.scalars().first()
-        if not conv:
-             # Create one if ID doesn't exist
-             conv = Conversation(id=conv_id, user_id=current_user.id)
-             db.add(conv)
-             await db.commit()
-        
-        # Save User Message
-        db.add(Message(conversation_id=conv_id, role="user", content=user_msg))
-        await db.commit()
-
-    # 2. Generator for Event-Stream
-    async def awal_response_generator():
-        full_ai_response = ""
+    async def generer_stream():
+        debut_total = time.time()
+        final_response = ""
+        final_meta = {}
         try:
-            # Connect to Brain Logic (brain.py)
-            for chunk in brain.generate_response(user_msg):
-                full_ai_response += chunk
-                # SSE Format
-                yield f"data: {json.dumps({'text': chunk, 'done': False})}\n\n"
-                await asyncio.sleep(0.01) # Small buffer for smoothness
+            historique = await bd_historique(u["id"], cid)
+            async for event in brain.traiter_message(req.message, historique=historique):
+                if event["type"] == "step":
+                    yield f"event: step\ndata: {json.dumps({'step': event['step'], 'label': event['label']})}\n\n"
+                elif event["type"] == "final":
+                    final_response = event["reponse"]
+                    final_meta = {
+                        "intention": event.get("intention"),
+                        "langue": event.get("langue", "tamazight"),
+                        "temps_total": int((time.time() - debut_total) * 1000)
+                    }
+                    yield f"event: token\ndata: {json.dumps(final_response, ensure_ascii=False)}\n\n"
             
-            # Send Final Chunk
-            yield f"data: {json.dumps({'done': True})}\n\n"
-
-            # 3. Save AI response in background session
-            if conv_id:
-                async with AsyncSessionLocal() as bg_db:
-                    ai_msg = Message(
-                        conversation_id=conv_id, 
-                        role="assistant", 
-                        content=full_ai_response
-                    )
-                    bg_db.add(ai_msg)
-                    # Update Title if it's the first message
-                    count_stmt = select(func.count(Message.id)).where(Message.conversation_id == conv_id)
-                    msg_count = (await bg_db.execute(count_stmt)).scalar()
-                    if msg_count <= 2:
-                        new_title = user_msg[:30] + "..."
-                        await bg_db.execute(update(Conversation).where(Conversation.id == conv_id).values(title=new_title))
-                    
-                    await bg_db.commit()
-
+            yield f"event: done\ndata: {json.dumps(final_meta)}\n\n"
+            # حفظ في قاعدة البيانات
+            await bd_inserer_message(u["id"], cid, req.message, final_response, req.domain, 
+                                   final_meta.get("intention"), final_meta.get("langue"), final_meta["temps_total"])
         except Exception as e:
-            log.error(f"Streaming Exception: {e}")
-            yield f"data: {json.dumps({'error': 'Désolé, une erreur est survenue dans le moteur AWAL.'})}\n\n"
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
-    return StreamingResponse(awal_response_generator(), media_type="text/event-stream")
+    return StreamingResponse(generer_stream(), media_type="text/event-stream")
 
-# ==========================================
-# 12. ENDPOINTS: SYSTEM & ANALYTICS
-# ==========================================
+@app.get("/conversations")
+async def lister_conversations(u=Depends(obtenir_utilisateur)):
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        bd.row_factory = aiosqlite.Row
+        cur = await bd.execute(
+            "SELECT conversation_id, MAX(horodatage) as d, message_utilisateur as t FROM messages "
+            "WHERE utilisateur_id=? GROUP BY conversation_id ORDER BY d DESC", (u["id"],)
+        )
+        lignes = await cur.fetchall()
+        return {"conversations": [{"id": l[0], "title": (l[2] or "...")[:30], "updated_at": l[1]} for l in lignes]}
 
-@app.get("/system/stats")
-async def get_app_stats(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    # Stats for current user
-    conv_count = await db.execute(select(func.count(Conversation.id)).where(Conversation.user_id == current_user.id))
-    msg_count = await db.execute(select(func.count(Message.id)).join(Conversation).where(Conversation.user_id == current_user.id))
-    
-    return {
-        "user": current_user.username,
-        "total_conversations": conv_count.scalar(),
-        "total_messages": msg_count.scalar(),
-        "engine": "AWAL-NLP-v2",
-        "status": "Online"
-    }
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow(),
-        "version": "2.5.0",
-        "region": os.getenv("RAILWAY_ENVIRONMENT", "production")
-    }
-
-# ==========================================
-# 13. ERROR HANDLERS
-# ==========================================
-@app.exception_handler(HTTPException)
-async def custom_http_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": True, "message": exc.detail},
-    )
-
-# ==========================================
-# 14. SERVER EXECUTION
-# ==========================================
 if __name__ == "__main__":
     import uvicorn
-    # Logic for Dynamic Port on Railway
-    server_port = int(os.getenv("PORT", 8080))
-    log.info(f"Démarrage du serveur sur le port {server_port}")
-    
-    uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
-        port=server_port, 
-        reload=False, # Set False in production
-        workers=4    # Multiprocessing for better performance
-    )
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
