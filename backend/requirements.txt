@@ -10,3 +10,9 @@ pyjwt
 bcrypt
 python-multipart
 httpx
+sqlalchemy
+aiomysql
+
+passlib[bcrypt]
+python-jose[cryptography]
+pydantic[email]
