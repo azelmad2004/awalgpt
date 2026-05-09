@@ -48,7 +48,9 @@ class ChatMessage(BaseModel):
     message: str
     conversation_id: str = None
     domain: str = "general"
-
+class ChatRequest(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None  # تأكد أن هذا الحقل موجود لربط الرسائل بال
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 # BASE DE DONNÉES SQLite (aiosqlite)
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
@@ -186,47 +188,106 @@ async def profil_utilisateur(u=Depends(obtenir_utilisateur)):
     return {"id": u["id"], "username": u["nom"], "email": u["email"]}
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatMessage, u=Depends(obtenir_utilisateur)):
-    cid = req.conversation_id or f"conv_{int(time.time())}"
-    
-    async def generer_stream():
-        debut_total = time.time()
-        final_response = ""
-        final_meta = {}
-        try:
-            historique = await bd_historique(u["id"], cid)
-            async for event in brain.traiter_message(req.message, historique=historique):
-                if event["type"] == "step":
-                    yield f"event: step\ndata: {json.dumps({'step': event['step'], 'label': event['label']})}\n\n"
-                elif event["type"] == "final":
-                    final_response = event["reponse"]
-                    final_meta = {
-                        "intention": event.get("intention"),
-                        "langue": event.get("langue", "tamazight"),
-                        "temps_total": int((time.time() - debut_total) * 1000)
-                    }
-                    yield f"event: token\ndata: {json.dumps(final_response, ensure_ascii=False)}\n\n"
-            
-            yield f"event: done\ndata: {json.dumps(final_meta)}\n\n"
-            # حفظ في قاعدة البيانات
-            await bd_inserer_message(u["id"], cid, req.message, final_response, req.domain, 
-                                   final_meta.get("intention"), final_meta.get("langue"), final_meta["temps_total"])
-        except Exception as e:
-            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+async def chat_stream(request: ChatRequest, current_user=Depends(get_current_user)):
+    # 1. التحقق من البيانات المرسلة
+    user_msg = request.message
+    conv_id = request.conversation_id or str(uuid.uuid4()) # إنشاء معرف جديد إذا لم يوجد
 
-    return StreamingResponse(generer_stream(), media_type="text/event-stream")
+    # 2. توليد رد الذكاء الاصطناعي (هنا تضع منطق AWAL GPT الخاص بك)
+    bot_res = "هذا رد تجريبي من AWAL GPT" 
 
+    # 3. حفظ في MySQL (Railway)
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO messages (user_id, conversation_id, user_message, bot_response) 
+            VALUES (:uid, :cid, :umsg, :bres)
+        """), {
+            "uid": current_user.id,
+            "cid": conv_id,
+            "umsg": user_msg,
+            "bres": bot_res
+        })
+        db.commit()
+    finally:
+        db.close()
+
+    return {"response": bot_res, "conversation_id": conv_id}
 @app.get("/conversations")
 async def lister_conversations(u=Depends(obtenir_utilisateur)):
+    """جلب قائمة المحادثات لليوزر الحالي ليظهر في القائمة الجانبية"""
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        bd.row_factory = aiosqlite.Row
+        # سنجلب معرف المحادثة، آخر رسالة كعنوان، وتاريخ آخر تحديث
+        query = """
+            SELECT conversation_id, MAX(horodatage) as last_update, message_utilisateur as title
+            FROM messages 
+            WHERE utilisateur_id = ? 
+            GROUP BY conversation_id 
+            ORDER BY last_update DESC
+        """
+        cur = await bd.execute(query, (u["id"],))
+        lignes = await cur.fetchall()
+        
+        return {
+            "conversations": [
+                {
+                    "id": l["conversation_id"],
+                    "title": (l["title"] or "Nouvelle discussion")[:40],
+                    "updated_at": l["last_update"]
+                } for l in lignes
+            ]
+        }
+
+@app.get("/conversations/{cid}/messages")
+async def obtenir_messages(cid: str, u=Depends(obtenir_utilisateur)):
+    """جلب كل الرسائل داخل محادثة معينة عند الضغط عليها"""
     async with aiosqlite.connect(CHEMIN_BD) as bd:
         bd.row_factory = aiosqlite.Row
         cur = await bd.execute(
-            "SELECT conversation_id, MAX(horodatage) as d, message_utilisateur as t FROM messages "
-            "WHERE utilisateur_id=? GROUP BY conversation_id ORDER BY d DESC", (u["id"],)
+            "SELECT message_utilisateur, message_bot, horodatage FROM messages "
+            "WHERE utilisateur_id=? AND conversation_id=? ORDER BY id ASC",
+            (u["id"], cid)
         )
         lignes = await cur.fetchall()
-        return {"conversations": [{"id": l[0], "title": (l[2] or "...")[:30], "updated_at": l[1]} for l in lignes]}
+        
+        # تحويل البيانات لتناسب واجهة React (Sender: user/bot)
+        msgs = []
+        for l in lignes:
+            msgs.append({"sender": "user", "text": l["message_utilisateur"], "date": l["horodatage"]})
+            msgs.append({"sender": "bot", "text": l["message_bot"], "date": l["horodatage"]})
+        
+        return {"messages": msgs}
 
+@app.delete("/conversations/{cid}")
+async def supprimer_conversation(cid: str, u=Depends(obtenir_utilisateur)):
+    """حذف محادثة بالكامل"""
+    async with aiosqlite.connect(CHEMIN_BD) as bd:
+        await bd.execute(
+            "DELETE FROM messages WHERE utilisateur_id=? AND conversation_id=?",
+            (u["id"], cid)
+        )
+        await bd.commit()
+    return {"status": "success", "message": "Conversation supprimée"}
+@app.get("/conversations")
+def list_history(current_user=Depends(get_current_user)):
+    db = SessionLocal()
+    # جلب آخر رسالة من كل محادثة لتظهر كعنوان
+    rows = db.execute(text("""
+        SELECT conversation_id, user_message, created_at 
+        FROM messages 
+        WHERE user_id = :uid 
+        AND id IN (SELECT MAX(id) FROM messages GROUP BY conversation_id)
+        ORDER BY created_at DESC
+    """), {"uid": current_user.id}).fetchall()
+    db.close()
+
+    return [
+        {"id": r.conversation_id, "title": r.user_message[:30], "date": r.created_at} 
+        for r in rows
+    ]
+# ── تحديث دالة chat_stream لحفظ التاريخ بشكل أفضل ──────────────────
+# تأكد أن دالة chat_stream تقوم بحفظ الرسائل كما في الكود السابق الذي أعطيتك إياه
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
