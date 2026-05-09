@@ -1,408 +1,434 @@
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
-# main.py — Serveur FastAPI AWAL GPT
-# Rôle : Authentification JWT, streaming SSE, gestion conversations SQLite
+# main.py — Serveur FastAPI AWAL GPT (Version Professionnelle MySQL)
+# Rôle : Authentification JWT, Streaming SSE, RAG Tamazight & Persistance MySQL
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
-import logging
-# ── Logger Configuration (Must be before other imports) ──────────────────
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%H:%M:%S",
-    force=True
-)
-for _lib in ("sentence_transformers", "httpx", "faiss", "transformers", "urllib3", "asyncio", "aiosqlite", "uvicorn", "rapidfuzz"):
-    logging.getLogger(_lib).setLevel(logging.ERROR)
-log = logging.getLogger("awalgpt")
 
 import os
-from dotenv import load_dotenv
-load_dotenv()
 import time
 import json
 import hashlib
+import logging
 import asyncio
-import sys
+import uuid
 from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-import aiosqlite
+# ── SQL Alchemy & MySQL ──────────────────────────────────────────────────
+from sqlalchemy import (
+    Column, String, Text, Integer, BigInteger, DateTime, 
+    ForeignKey, select, delete, func, desc
+)
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+
+# ── FastAPI & Securité ─────────────────────────────────────────────────────
 import bcrypt
 import jwt
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+
+# ── Logique Métier (Brain) ────────────────────────────────────────────────
 import brain
-
-# ── Configuration ──────────────────────────────────────────────────────────
-CLE_GROQ   = os.getenv("GROQ_API_KEY", "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")
-SECRET_JWT = os.getenv("JWT_SECRET", "awal_gpt_ultra_secure_secret_key_2026_long_enough")
-CHEMIN_BD  = os.getenv("DB_PATH", "awalgpt.db")
-
-DOMAINES_VALIDES = {"health", "economy", "education", "culture", "tech", "daily"}
-
+from core import chargerMoteurTfidf, chargerMoteurSemantique
 
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
-# BASE DE DONNÉES SQLite (aiosqlite)
+# CONFIGURATION ET LOGGER
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-async def initialiser_base() -> None:
-    """Crée toutes les tables SQLite au premier démarrage."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        # Optimisations SQLite
-        await bd.execute("PRAGMA journal_mode=WAL")
-        await bd.execute("PRAGMA synchronous=NORMAL")
-        await bd.execute("PRAGMA cache_size=10000")
-        
-        await bd.executescript("""
-            CREATE TABLE IF NOT EXISTS utilisateurs (
-                id TEXT PRIMARY KEY, nom TEXT, email TEXT UNIQUE,
-                mot_de_passe TEXT, variete TEXT, cree_le TEXT
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                utilisateur_id TEXT, conversation_id TEXT,
-                message_utilisateur TEXT, message_bot TEXT,
-                domaine TEXT, intention TEXT, langue TEXT,
-                temps_ms INTEGER, horodatage TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(utilisateur_id);
-            CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
-            CREATE TABLE IF NOT EXISTS cache (
-                cle TEXT PRIMARY KEY, reponse TEXT, horodatage TEXT
-            );
-        """)
-        await bd.commit()
-    log.info("[DB] Base initialisée")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger("awalgpt")
 
+# Variables d'environnement
+CLE_GROQ   = os.getenv("GROQ_API_KEY")
+SECRET_JWT = os.getenv("JWT_SECRET", "awal_gpt_secret_2026_ultra_long_key_for_security")
+MYSQL_URL  = os.getenv("MYSQL_URL") # Format: mysql://user:pass@host:port/db
 
-async def bd_trouver_utilisateur(uid: str) -> dict:
-    """Recherche un utilisateur par son identifiant SHA-256."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        bd.row_factory = aiosqlite.Row
-        cur = await bd.execute("SELECT * FROM utilisateurs WHERE id = ?", (uid,))
-        ligne = await cur.fetchone()
-        return dict(ligne) if ligne else None
-
-
-async def bd_creer_utilisateur(
-    uid: str, nom: str, email: str, hache: str, variete: str = None
-) -> None:
-    """Insère un nouvel utilisateur dans la base."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        await bd.execute(
-            "INSERT INTO utilisateurs VALUES (?,?,?,?,?,?)",
-            (uid, nom, email, hache, variete, datetime.now().isoformat())
-        )
-        await bd.commit()
-
-
-async def bd_historique(uid: str, conv_id: str) -> list:
-    """Récupère les 10 derniers échanges d'une conversation (format alternant user/assistant)."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        bd.row_factory = aiosqlite.Row
-        cur = await bd.execute(
-            "SELECT message_utilisateur, message_bot FROM messages "
-            "WHERE utilisateur_id=? AND conversation_id=? "
-            "ORDER BY id DESC LIMIT 10",
-            (uid, conv_id)
-        )
-        lignes = await cur.fetchall()
-    hist = []
-    for ligne in reversed(lignes):
-        if ligne[0]:
-            hist.append({"role": "user",      "content": ligne[0]})
-        if ligne[1]:
-            hist.append({"role": "assistant", "content": ligne[1]})
-    return hist
-
-
-async def bd_inserer_message(
-    uid: str, cid: str, msg_user: str, msg_bot: str,
-    domaine: str, intention: str, langue: str, temps_ms: int
-) -> None:
-    """Sauvegarde un échange utilisateur/bot dans la base."""
-    log.debug(f"[DB] Inserer message: CID={cid} | Intent={intention}")
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        await bd.execute(
-            "INSERT INTO messages "
-            "(utilisateur_id, conversation_id, message_utilisateur, message_bot, "
-            "domaine, intention, langue, temps_ms, horodatage) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (uid, cid, msg_user, msg_bot, domaine, intention, langue,
-             temps_ms, datetime.now().isoformat())
-        )
-        await bd.commit()
-
-
-async def bd_lister_conversations(uid: str) -> list:
-    """Liste toutes les conversations d'un utilisateur (ordonnées par date desc)."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        bd.row_factory = aiosqlite.Row
-        cur = await bd.execute(
-            "SELECT conversation_id, MAX(horodatage) as d, message_utilisateur as t, COUNT(*) as nb "
-            "FROM messages WHERE utilisateur_id=? "
-            "GROUP BY conversation_id ORDER BY d DESC",
-            (uid,)
-        )
-        return [
-            {"id": l[0], "title": (l[2] or "Nouvelle discussion")[:30], "updated_at": l[1], "count": l[3]}
-            for l in await cur.fetchall()
-        ]
-
+# Conversion de l'URL pour SQLAlchemy Async
+if MYSQL_URL and MYSQL_URL.startswith("mysql://"):
+    DATABASE_URL = MYSQL_URL.replace("mysql://", "mysql+aiomysql://")
+else:
+    # Fallback pour le développement local si MYSQL_URL n'est pas défini
+    DATABASE_URL = "mysql+aiomysql://root:password@localhost:3306/awalgpt"
 
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
-# AUTHENTIFICATION JWT
+# MODÈLES DE DONNÉES (SQLAlchemy)
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-def creer_token(uid: str) -> str:
-    """Génère un token JWT valable 30 jours."""
-    return jwt.encode(
-        {"sub": uid, "exp": datetime.now(timezone.utc) + timedelta(days=30)},
-        SECRET_JWT,
-        algorithm="HS256"
-    )
+Base = declarative_base()
 
+class User(Base):
+    __tablename__ = "utilisateurs"
+    id = Column(String(64), primary_key=True)
+    nom = Column(String(100), nullable=False)
+    email = Column(String(150), unique=True, nullable=False, index=True)
+    mot_de_passe = Column(String(255), nullable=False)
+    variete_preferee = Column(String(50), default="standard")
+    cree_le = Column(DateTime, default=datetime.utcnow)
+    
+    messages = relationship("Message", back_populates="user", cascade="all, delete-orphan")
 
-async def obtenir_utilisateur(requete: Request) -> dict:
-    """
-    Dépendance FastAPI : valide le token JWT et retourne l'utilisateur.
-    Lève HTTPException 401 si le token est absent, invalide ou expiré.
-    """
-    token = requete.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    if not token:
-        raise HTTPException(401, "Token manquant")
+class Message(Base):
+    __tablename__ = "messages"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    utilisateur_id = Column(String(64), ForeignKey("utilisateurs.id"), index=True)
+    conversation_id = Column(String(64), index=True)
+    
+    role = Column(String(20)) # 'user' ou 'assistant'
+    contenu = Column(Text, nullable=False)
+    
+    # Métadonnées IA
+    domaine = Column(String(50))
+    intention = Column(String(50))
+    langue = Column(String(20))
+    temps_traitement_ms = Column(Integer, default=0)
+    horodatage = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="messages")
+
+# Configuration de l'Engine Async
+engine = create_async_engine(
+    DATABASE_URL, 
+    pool_pre_ping=True, 
+    pool_recycle=3600,
+    echo=False
+)
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# UTILITAIRES DE SÉCURITÉ ET JWT
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+
+def generer_token(uid: str) -> str:
+    """Crée un token JWT valide 30 jours."""
+    payload = {
+        "sub": uid,
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(days=30)
+    }
+    return jwt.encode(payload, SECRET_JWT, algorithm="HS256")
+
+async def verifier_token(requete: Request) -> User:
+    """Vérifie le token dans le header Authorization."""
+    auth_header = requete.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token manquant ou format invalide")
+    
+    token = auth_header.split(" ")[1]
     try:
         payload = jwt.decode(token, SECRET_JWT, algorithms=["HS256"])
-        utilisateur = await bd_trouver_utilisateur(payload["sub"])
-        if utilisateur:
-            return utilisateur
+        uid = payload.get("sub")
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(User).where(User.id == uid))
+            user = result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(status_code=401, detail="Utilisateur non trouvé")
+            return user
     except jwt.ExpiredSignatureError:
-        raise HTTPException(401, "Token expiré")
-    except Exception:
-        pass
-    raise HTTPException(401, "Token invalide")
-
+        raise HTTPException(status_code=401, detail="Token expiré")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token invalide")
 
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
-# APPLICATION FASTAPI
+# GESTION DES CYCLES DE VIE (LIFESPAN)
 # #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialisation au démarrage, nettoyage à l'arrêt."""
-    log.info("[STARTUP] Initialisation Awal GPT...")
-    await initialiser_base()
-    
-    # Initialisation des composants Brain/Core
-    # Note: brain.core.charger_donnees_fusionnees() est déjà appelé lors de l'import
-    brain.charger_configs()
-    
-    log.info("[STARTUP] Awal GPT prêt.")
+    """Initialisation au démarrage et nettoyage à l'arrêt."""
+    log.info("[STARTUP] Connexion à MySQL et vérification des tables...")
+    try:
+        async with engine.begin() as conn:
+            # Crée les tables si elles n'existent pas
+            await conn.run_sync(Base.metadata.create_all)
+        log.info("[STARTUP] Base de données MySQL prête.")
+        
+        # Initialisation des moteurs de recherche (RAG)
+        log.info("[STARTUP] Chargement des moteurs IA...")
+        brain.charger_configs()
+        log.info("[STARTUP] Moteurs IA opérationnels.")
+        
+    except Exception as e:
+        log.error(f"[STARTUP] Erreur critique : {e}")
+        # On ne stoppe pas forcément, mais les requêtes échoueront
+        
     yield
-    log.info("[SHUTDOWN] Awal GPT arrêté.")
+    
+    log.info("[SHUTDOWN] Fermeture des connexions MySQL...")
+    await engine.dispose()
 
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# ROUTES API
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-app = FastAPI(title="Awal GPT — API Tamazight", version="3.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="AWAL GPT - API Professionnelle",
+    description="Backend IA pour la langue Tamazight avec RAG et MySQL",
+    version="3.5.0",
+    lifespan=lifespan
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
 )
 
-
 @app.get("/")
-async def root():
-    return {"name": "Awal GPT API", "status": "online", "version": "3.0.0"}
+async def index():
+    return {
+        "app": "AWAL GPT API",
+        "status": "active",
+        "db": "MySQL",
+        "engine": "FastAPI + Groq"
+    }
 
 @app.get("/health")
-async def health():
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+async def health_check():
+    return {"status": "healthy", "time": datetime.utcnow().isoformat()}
 
-# ── Endpoints d'authentification ──────────────────────────────────────────
+# ── Authentification ───────────────────────────────────────────────────────
 
 @app.post("/auth/register")
-async def inscrire(req: Request):
-    """Crée un nouveau compte utilisateur. Valide email + password + username."""
-    try:
-        corps = await req.json()
-    except Exception:
-        raise HTTPException(400, "Corps JSON invalide")
+async def register(req: Request):
+    data = await req.json()
+    email = data.get("email", "").lower().strip()
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
 
-    email = corps.get("email", "").lower().strip()
-    nom   = corps.get("username", "").strip()
-    mdp   = corps.get("password", "")
-
-    if not email or not mdp or not nom:
-        raise HTTPException(400, "email, password et username requis")
-    if "@" not in email or "." not in email.split("@")[-1]:
-        raise HTTPException(400, "Format d'email invalide")
-    if len(mdp) < 6:
-        raise HTTPException(400, "Mot de passe trop court (minimum 6 caractères)")
+    if not email or not password or not username:
+        raise HTTPException(400, "Tous les champs sont requis")
 
     uid = hashlib.sha256(email.encode()).hexdigest()
-    if await bd_trouver_utilisateur(uid):
-        raise HTTPException(400, "Email déjà utilisé")
+    hashed_pwd = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-    hache = bcrypt.hashpw(mdp.encode(), bcrypt.gensalt()).decode()
-    await bd_creer_utilisateur(uid, nom, email, hache, corps.get("preferred_variety"))
-    log.info(f"[AUTH] Nouvel utilisateur : {nom}")
-    return {"token": creer_token(uid), "user": {"id": uid, "username": nom}}
+    async with AsyncSessionLocal() as session:
+        # Vérifier si l'utilisateur existe déjà
+        check = await session.execute(select(User).where(User.email == email))
+        if check.scalar_one_or_none():
+            raise HTTPException(400, "Cet email est déjà enregistré")
 
+        new_user = User(
+            id=uid,
+            nom=username,
+            email=email,
+            mot_de_passe=hashed_pwd
+        )
+        session.add(new_user)
+        await session.commit()
+        
+    log.info(f"[AUTH] Inscription : {username} ({email})")
+    return {"token": generer_token(uid), "user": {"id": uid, "username": username}}
 
 @app.post("/auth/login")
-async def connexion(req: Request):
-    """Authentifie un utilisateur et retourne un token JWT."""
-    try:
-        corps = await req.json()
-    except Exception:
-        raise HTTPException(400, "Corps JSON invalide")
+async def login(req: Request):
+    data = await req.json()
+    email = data.get("email", "").lower().strip()
+    password = data.get("password", "")
 
-    email = corps.get("email", "").lower().strip()
-    mdp   = corps.get("password", "")
-    uid   = hashlib.sha256(email.encode()).hexdigest()
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        
+        if user and bcrypt.checkpw(password.encode(), user.mot_de_passe.encode()):
+            log.info(f"[AUTH] Connexion : {user.nom}")
+            return {
+                "token": generer_token(user.id),
+                "user": {"id": user.id, "username": user.nom}
+            }
+            
+    raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
-    utilisateur = await bd_trouver_utilisateur(uid)
-    if utilisateur and bcrypt.checkpw(mdp.encode(), utilisateur["mot_de_passe"].encode()):
-        log.info(f"[AUTH] Connexion : {utilisateur['nom']}")
+# ── Gestion des Conversations ──────────────────────────────────────────────
+
+@app.get("/conversations")
+async def get_conversations(current_user: User = Depends(verifier_token)):
+    async with AsyncSessionLocal() as session:
+        # On récupère l'ID de conversation unique et le dernier message pour chaque
+        query = (
+            select(
+                Message.conversation_id, 
+                func.max(Message.horodatage).label("last_date"),
+                func.count(Message.id).label("count")
+            )
+            .where(Message.utilisateur_id == current_user.id)
+            .group_by(Message.conversation_id)
+            .order_by(desc("last_date"))
+        )
+        results = await session.execute(query)
+        
+        convs = []
+        for row in results:
+            convs.append({
+                "id": row.conversation_id,
+                "updated_at": row.last_date.isoformat(),
+                "messages_count": row.count
+            })
+            
+        return {"conversations": convs}
+
+@app.get("/conversations/{cid}/messages")
+async def get_messages(cid: str, current_user: User = Depends(verifier_token)):
+    async with AsyncSessionLocal() as session:
+        query = (
+            select(Message)
+            .where(Message.utilisateur_id == current_user.id, Message.conversation_id == cid)
+            .order_by(Message.horodatage.asc())
+        )
+        result = await session.execute(query)
+        messages = result.scalars().all()
+        
         return {
-            "token": creer_token(utilisateur["id"]),
-            "user":  {"id": utilisateur["id"], "username": utilisateur["nom"]},
+            "messages": [
+                {
+                    "role": m.role,
+                    "content": m.contenu,
+                    "timestamp": m.horodatage.isoformat(),
+                    "meta": {"intent": m.intention, "lang": m.langue}
+                } for m in messages
+            ]
         }
-    raise HTTPException(401, "Email ou mot de passe incorrect")
 
+@app.delete("/conversations/{cid}")
+async def delete_conversation(cid: str, current_user: User = Depends(verifier_token)):
+    async with AsyncSessionLocal() as session:
+        q = delete(Message).where(Message.utilisateur_id == current_user.id, Message.conversation_id == cid)
+        await session.execute(q)
+        await session.commit()
+    return {"status": "success", "message": "Conversation supprimée"}
 
-@app.get("/auth/me")
-async def profil_utilisateur(u=Depends(obtenir_utilisateur)):
-    """Retourne les informations de l'utilisateur connecté."""
-    return {"id": u["id"], "username": u["nom"], "email": u["email"]}
-
-
-@app.get("/admin/users")
-async def admin_lister_utilisateurs(key: str = None):
-    """Route admin pour voir les inscrits (pour debug Railway)."""
-    ADMIN_KEY = os.getenv("ADMIN_KEY", "awal_debug_2026")
-    if key != ADMIN_KEY:
-        raise HTTPException(403, "Accès refusé")
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        bd.row_factory = aiosqlite.Row
-        cur = await bd.execute("SELECT id, nom, email, cree_le FROM utilisateurs")
-        utilisateurs = await cur.fetchall()
-        return {"total": len(utilisateurs), "utilisateurs": [dict(u) for u in utilisateurs]}
-
-
-# ── Endpoint de chat (Server-Sent Events) ─────────────────────────────────
+# ── CŒUR IA : STREAMING SSE ────────────────────────────────────────────────
 
 @app.post("/chat/stream")
-async def chat_stream(req: Request, u=Depends(obtenir_utilisateur)):
-    """
-    Traite un message et retourne la réponse en Server-Sent Events (SSE).
-    """
+async def chat_stream(req: Request, current_user: User = Depends(verifier_token)):
+    """Traitement par streaming avec sauvegarde asynchrone MySQL."""
     try:
-        corps = await req.json()
-    except Exception:
-        raise HTTPException(400, "Corps JSON invalide")
+        body = await req.json()
+    except:
+        raise HTTPException(400, "JSON invalide")
 
-    message = corps.get("message", "").strip()
-    if not message:
+    user_message = body.get("message", "").strip()
+    conversation_id = body.get("conversation_id") or f"conv_{uuid.uuid4().hex[:10]}"
+    
+    if not user_message:
         raise HTTPException(400, "Message vide")
 
-    cid = corps.get("conversation_id") or f"conv_{int(time.time())}"
-
-    async def generer_stream():
-        debut_total = time.time()
-        done_sent = False
-        final_meta = {}
-        final_response = ""
+    async def event_generator():
+        start_time = time.time()
+        full_response = ""
+        metadata = {}
         
+        # 1. Récupération de l'historique pour le contexte
+        historique_contexte = []
+        async with AsyncSessionLocal() as session:
+            h_query = (
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(desc(Message.horodatage))
+                .limit(8)
+            )
+            h_res = await session.execute(h_query)
+            for m in reversed(h_res.scalars().all()):
+                historique_contexte.append({"role": m.role, "content": m.contenu})
+
         try:
-            historique = await bd_historique(u["id"], cid)
-            
-            # brain.traiter_message est un async generator
-            async for event in brain.traiter_message(message, historique=historique):
-                if event["type"] == "step":
-                    yield f"event: step\ndata: {json.dumps({'step': event['step'], 'label': event['label']})}\n\n"
-                    # Petit délai pour la fluidité UI
-                    await asyncio.sleep(0.05)
+            # 2. Appel au moteur IA (Async Generator)
+            async for event in brain.traiter_message(user_message, historique=historique_contexte):
+                # Format SSE : 'event: [name]\ndata: [json]\n\n'
                 
+                if event["type"] == "step":
+                    yield f"event: step\ndata: {json.dumps({'label': event['label']})}\n\n"
+                    await asyncio.sleep(0.01)
+
+                elif event["type"] == "token":
+                    content = event.get("reponse", "")
+                    full_response += content
+                    yield f"event: token\ndata: {json.dumps(content, ensure_ascii=False)}\n\n"
+
                 elif event["type"] == "final":
-                    final_response = event["reponse"]
-                    yield f"event: token\ndata: {json.dumps(final_response, ensure_ascii=False)}\n\n"
-                    
-                    final_meta = {
-                        "intention":    event.get("intention"),
-                        "confiance":    event.get("confiance", 0),
-                        "langue":       event.get("langue", "tamazight"),
-                        "temps_rag_ms": event.get("temps_rag_ms", 0),
-                        "temps_llm_ms": event.get("temps_llm_ms", 0),
-                        "temps_total":  int((time.time() - debut_total) * 1000),
+                    metadata = {
+                        "intention": event.get("intention"),
+                        "langue": event.get("langue", "tamazight"),
+                        "domaine": event.get("domaine", "general"),
+                        "confiance": event.get("confiance", 0)
                     }
+            
+            # 3. Calcul du temps et envoi du signal de fin
+            total_duration = int((time.time() - start_time) * 1000)
+            yield f"event: done\ndata: {json.dumps({'time_ms': total_duration, **metadata})}\n\n"
 
-            if final_meta:
-                log.info(f"[CHAT] Stream Done: {final_meta['intention']} | total: {final_meta['temps_total']}ms | user: {u['nom']}")
-                yield f"event: done\ndata: {json.dumps(final_meta)}\n\n"
-                done_sent = True
-
-                # Sauvegarde en base
-                await bd_inserer_message(
-                    u["id"], cid, message, final_response,
-                    corps.get("domain", "general"), 
-                    final_meta["intention"],
-                    final_meta["langue"], 
-                    final_meta["temps_total"]
+            # 4. Sauvegarde asynchrone dans MySQL
+            async with AsyncSessionLocal() as session:
+                # Sauvegarde message utilisateur
+                m_user = Message(
+                    utilisateur_id=current_user.id,
+                    conversation_id=conversation_id,
+                    role="user",
+                    contenu=user_message,
+                    horodatage=datetime.utcnow()
                 )
+                # Sauvegarde réponse assistant
+                m_bot = Message(
+                    utilisateur_id=current_user.id,
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    contenu=full_response,
+                    intention=metadata.get("intention"),
+                    langue=metadata.get("langue"),
+                    domaine=metadata.get("domaine"),
+                    temps_traitement_ms=total_duration,
+                    horodatage=datetime.utcnow() + timedelta(seconds=1)
+                )
+                session.add_all([m_user, m_bot])
+                await session.commit()
+                log.info(f"[CHAT] Sauvegardé : {conversation_id} | User: {current_user.nom}")
 
-        except Exception as erreur:
-            log.error(f"[CHAT] Erreur stream : {erreur}", exc_info=True)
-            yield f"event: error\ndata: {json.dumps({'error': 'Erreur serveur', 'detail': str(erreur)})}\n\n"
-        finally:
-            if not done_sent:
-                yield f"event: done\ndata: {json.dumps({'error': True, 'temps_total': int((time.time()-debut_total)*1000)})}\n\n"
+        except Exception as e:
+            log.error(f"[STREAM ERROR] {e}")
+            yield f"event: error\ndata: {json.dumps({'message': 'Erreur interne de traitement'})}\n\n"
 
     return StreamingResponse(
-        generer_stream(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
         }
     )
 
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
+# GESTION DU PORT ET LANCEMENT (RAILWAY FRIENDLY)
+# #══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════#══════
 
-# ── Endpoints de gestion des conversations ────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Railway utilise la variable d'environnement PORT
+    # Si elle n'existe pas, on utilise 8080 par défaut
+    port_env = os.environ.get("PORT", "8080")
+    try:
+        target_port = int(port_env)
+    except ValueError:
+        target_port = 8080
 
-@app.get("/conversations")
-async def lister_conversations(u=Depends(obtenir_utilisateur)):
-    """Liste toutes les conversations de l'utilisateur connecté."""
-    return {"conversations": await bd_lister_conversations(u["id"])}
-
-
-@app.get("/conversations/{cid}/messages")
-async def obtenir_messages(cid: str, u=Depends(obtenir_utilisateur)):
-    """Retourne tous les messages d'une conversation ordonnés chronologiquement."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        bd.row_factory = aiosqlite.Row
-        cur = await bd.execute(
-            "SELECT message_utilisateur, message_bot, horodatage "
-            "FROM messages WHERE utilisateur_id=? AND conversation_id=? ORDER BY id ASC",
-            (u["id"], cid)
-        )
-        msgs = []
-        for ligne in await cur.fetchall():
-            msgs.append({"sender": "user", "content": ligne[0], "date": ligne[2]})
-            msgs.append({"sender": "bot",  "content": ligne[1], "date": ligne[2]})
-        return {"messages": msgs}
-
-
-@app.delete("/conversations/{cid}")
-async def supprimer_conversation(cid: str, u=Depends(obtenir_utilisateur)):
-    """Supprime tous les messages d'une conversation."""
-    async with aiosqlite.connect(CHEMIN_BD) as bd:
-        await bd.execute(
-            "DELETE FROM messages WHERE utilisateur_id=? AND conversation_id=?",
-            (u["id"], cid)
-        )
-        await bd.commit()
-    return {"status": "ok"}
+    log.info(f"🚀 Lancement du serveur sur le port {target_port}...")
+    
+    # Configuration Uvicorn optimisée
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=target_port,
+        reload=False,     # Désactiver reload en production
+        workers=1,         # Railway Free/Hobby préfère 1 worker stable
+        proxy_headers=True,
+        forwarded_allow_ips="*"
+    )
