@@ -5,7 +5,7 @@
     "installCommand": "npm install --package-lock=false"
   },
   "deploy": {
-    "startCommand": "npx serve -s build -l tcp://backend-production-72c3.up.railway.app:$PORT",
+    "startCommand": "npx serve -s build -l tcp://0.0.0.0:$PORT",
     "restartPolicyType": "ON_FAILURE"
   }
 }
