@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../App';
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_URL = "https://backend-production-72c3.up.railway.app";
 const api = axios.create({ baseURL: API_URL, headers: { 'Content-Type': 'application/json' } });
 api.interceptors.request.use(config => {
   const t = localStorage.getItem('awal_token');
