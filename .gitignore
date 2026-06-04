@@ -1,0 +1,47 @@
+# Dependencies
+frontend/node_modules/
+node_modules/
+
+# Environment variables / Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+frontend/.env
+backend/.env
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+backend/__pycache__/
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Databases
+*.db
+backend/awalgpt.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Large Model files
+*.gguf
+
